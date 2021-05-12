@@ -177,7 +177,7 @@ def main():
 
     print("Done!")
     end_time = time.time()
-    print(end_time - start_time)
+    print('time:' + str(end_time - start_time) + 's')
     # 5) Evaluation and visualization
 
     # The last thing to do is to check how your code performs on the image pairs

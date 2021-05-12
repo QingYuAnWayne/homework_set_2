@@ -7,6 +7,7 @@ import sys
 import argparse
 import numpy as np
 import scipy.io as scio
+import time
 
 import matplotlib
 
@@ -95,12 +96,13 @@ def main():
     """
 
     # create the command line parser
+    start_time = time.time()
     parser = argparse.ArgumentParser()
 
     parser.add_argument("-p", "--pair", required=True,
                         help="Either notre_dame, mt_rushmore, or e_gaudi. Specifies which image pair to match")
 
-    args = parser.parse_args(['-p', 'notre dame'])
+    args = parser.parse_args(['-p', 'e_gaudi'])
 
     # (1) Load in the data
     image1_color, image2_color, eval_file = load_data(args.pair)
@@ -142,7 +144,7 @@ def main():
     # points for mt. rushmore will not produce good results, so you'll have to use
     # your own function for that image pair.
 
-    (x1, y1, x2, y2) = cheat_interest_points(eval_file, scale_factor)
+    # (x1, y1, x2, y2) = cheat_interest_points(eval_file, scale_factor)
 
     # if you want to view your corners uncomment these next lines!
 
@@ -171,10 +173,11 @@ def main():
 
     print("Matching features...")
 
-    matches, confidences = student.match_features(image1_features, image2_features)
+    matches, confidences = student.match_features_kdtree(image1_features, image2_features)
 
     print("Done!")
-
+    end_time = time.time()
+    print(end_time - start_time)
     # 5) Evaluation and visualization
 
     # The last thing to do is to check how your code performs on the image pairs

@@ -1,10 +1,7 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from skimage import filters, feature, img_as_int
-from skimage.measure import regionprops
-from math import pi,ceil
-from scipy.spatial.distance import cdist
-import cv2
+from skimage import filters, feature, img_as_int, transform
+from math import pi, ceil
+from scipy.spatial import KDTree
 
 
 def get_interest_points(image, feature_width):
@@ -48,9 +45,32 @@ def get_interest_points(image, feature_width):
     # TODO: Your implementation here! See block comments and the project instructions
 
     # These are placeholders - replace with the coordinates of your interest points!
-    xs = []
-    ys = []
-    return xs, ys
+    # blur
+    rescale = False
+    if image.shape[0] < 1000 and image.shape[1] < 1000:
+        rescale = True
+        image = np.float32(transform.rescale(image, 2))
+    sigma = 2.0
+    alpha = 0.04
+    blur_image = filters.gaussian(image, sigma=sigma)
+    Iy, Ix = np.gradient(blur_image)
+    Ixx = filters.gaussian(Ix ** 2, sigma=sigma)
+    Iyy = filters.gaussian(Iy ** 2, sigma=sigma)
+    Ixy = filters.gaussian(Ix * Iy, sigma=sigma)
+    C = Ixx * Iyy - Ixy ** 2 - alpha * ((Ixx + Iyy) ** 2)
+    C = C / np.linalg.norm(C)
+    threshold = np.percentile(C, [60.0])
+    np.putmask(C, C < threshold, 0)
+    interested_points = feature.peak_local_max(
+        C,
+        min_distance=feature_width // 2,
+        threshold_abs=2e-6,
+        exclude_border=True,
+        num_peaks=700,
+    )
+    if rescale:
+        interested_points = interested_points / 2
+    return interested_points[:, 1], interested_points[:, 0]
 
 
 def get_features(image, x, y, feature_width):
@@ -118,13 +138,17 @@ def get_features(image, x, y, feature_width):
 
     # This is a placeholder - replace this with your features!
     # 初始化
+    if image.shape[0] < 1000 and image.shape[1] < 1000:
+        image = np.float32(transform.rescale(image, 2))
+        x = x * 2
+        y = y * 2
     features = np.zeros((len(x), 128))
     # 获得4个重要的值
     grad_x = filters.sobel_v(image)
     grad_y = filters.sobel_h(image)
-    grad_mag = np.sqrt(grad_x ** 2 + grad_y ** 2)
+    grad_mag = np.sqrt(grad_x * grad_x + grad_y * grad_y)
     grad_ori = np.arctan2(grad_y, grad_x)
-    #确定步长
+    # 确定步长
     stride = feature_width // 4
     for j in range(len(x)):
         i = 0
@@ -132,21 +156,40 @@ def get_features(image, x, y, feature_width):
         # 开始按顺序求梯度直方图
         for x_ in range(ceil(x[j]) - 2 * stride, ceil(x[j]) + stride + 1, stride):
             for y_ in range(ceil(y[j]) - 2 * stride, ceil(y[j]) + stride + 1, stride):
-                s = get_bin(grad_mag[x_:x_ + stride, y_:y_ + stride],
-                            grad_ori[x_:x_ + stride, y_:y_ + stride])
+                if grad_mag[y_:y_ + stride, x_:x_ + stride].shape != (4, 4):
+                    continue
+                s = get_bin(grad_mag[y_:y_ + stride, x_:x_ + stride],
+                            grad_ori[y_:y_ + stride, x_:x_ + stride])
                 features[j, 8 * i:8 * (i + 1)] = s
                 i += 1
+        feature = features[j] ** 0.6
+        feature_norm = feature / np.linalg.norm(feature)
+        threshold = np.percentile(feature_norm, [60.0])
+        np.putmask(feature_norm, feature_norm < threshold, 0)
+        feature_norm = feature_norm ** 0.7
+        feature = feature_norm / np.linalg.norm(feature_norm)
+        features[j] = feature
     return features
+
+
+def PCA(features1, features2, m):
+    C = (features1 - np.mean(features1, axis=0)) / (np.std(features1, axis=0) + 1e-5)
+    cov_matrix = np.cov(C.T)
+    eigenvals, eigenvecs = np.linalg.eig(cov_matrix)
+    i = np.argsort(-1 * np.abs(eigenvals))
+    eigenvecs = eigenvecs[i]
+    pca_features1 = np.dot(eigenvecs.T, features1.T)
+    pca_features2 = np.dot(eigenvecs.T, features2.T)
+    return pca_features1[:m].T, pca_features2[:m].T
 
 
 def get_bin(grad_mag, grad_ori):
     s = np.zeros((1, 8))
-    for i in range(8):
-        theta1 = pi * 2 / 8 * i - pi
-        theta2 = pi * 2 / 8 * (i + 1) - pi
-        # 处于该范围的就取出来相加
-        tmp = np.where((theta1 <= grad_ori) & (grad_ori < theta2), True, False)
-        s[:, i] = grad_mag[tmp].sum()
+    ori_list = np.arange(- np.pi, np.pi, np.pi / 4)
+    inds = np.digitize(grad_ori, ori_list)
+    for inds_i in range(8):
+        mask = np.array(inds == inds_i)
+        s[:, inds_i] = np.sum(grad_mag[mask])
     return s
 
 
@@ -182,31 +225,57 @@ def match_features(im1_features, im2_features):
     # TODO: Your implementation here! See block comments and the project instructions
 
     # These are placeholders - replace with your matches and confidences!
-    ratio = 1
+
+    im1_features, im2_features = PCA(im1_features, im2_features, 36)
+
+    ratio = 0.8
     matches = None
     confidences = None
-    NND = cdist(im1_features, im2_features, 'euclidean')
-    # 找到NND在im1中的所有点与im2中所有点的欧式距离中最小的那一个的index （针对每行的index）
-    index_min = np.argmin(NND, axis=1)
-    # 找到最小的欧式距离
-    NN1 = np.min(NND, axis=1)
-    # 找到最大的欧氏距离
-    max_num = np.max(NND)
-    # 把刚才的最小的点欧式距离变成最大的欧式距离+1
-    for i in range(NND.shape[0]):
-        NND[i, index_min[i]] = max_num + 1
-    # 这里找到的就是第二小的欧式距离了
-    NN2 = np.min(NND, axis=1)
-    # 防止NN2 还是0， 所以加一个极其小的数， 得到的NN1/NN2
-    NN1_NN2 = NN1 / (NN2 + 1e-4)
-    for i in range(NN1_NN2.shape[0]):
-        if 0 < NN1_NN2[i] < ratio:
-            # match success
-            index = index_min[i]
-            p1 = i
-            p2 = index
-            m = np.array([p1, p2]).reshape((1, 2))
-            c = np.array([1-NN1_NN2[i]])
+    N1 = im1_features.shape[0]
+    N2 = im2_features.shape[0]
+    # im1_features = n * [fn1, fn2, fn3, ....., fnn]
+    NND = np.zeros((N1, N2))
+    # 求一个点到所有点的距离
+    for i in range(N1):
+        vec = im2_features - im1_features[i]
+        NND[i] = np.linalg.norm(vec, axis=1)
+    for i in range(im1_features.shape[0]):
+        L = np.argsort(NND[i])
+        min_index = L[0]
+        second_min_index = L[1]
+        rel = NND[i][min_index] / (NND[i][second_min_index] + 1e-8)
+        confidence = 1 - rel
+        if 0 < rel < ratio:
+            m = np.array([i, min_index]).reshape((1, 2))
+            c = np.array([confidence])
+            if matches is None:
+                matches = m
+            else:
+                matches = np.r_[matches, m]
+            if confidences is None:
+                confidences = c
+            else:
+                confidences = np.r_[confidences, c]
+    return matches, confidences
+
+
+def match_features_kdtree(im1_features, im2_features):
+
+    im1_features, im2_features = PCA(im1_features, im2_features, 36)
+
+    ratio = 0.8
+    matches = None
+    confidences = None
+    tree = KDTree(im2_features)
+    for i in range(im1_features.shape[0]):
+        NN1, NN2 = tree.query(im1_features[i], k=2)
+        min_dis, sec_dis = NN1
+        min_index, _ = NN2
+        rel = min_dis / (sec_dis + 1e-8)
+        confidence = 1 - rel
+        if 0 < rel < ratio:
+            m = np.array([i, min_index]).reshape((1, 2))
+            c = np.array([confidence])
             if matches is None:
                 matches = m
             else:
